@@ -1,14 +1,38 @@
 import numpy as np
 from PIL import Image
-from collections import deque
+
+class NaryTreeNode:
+    def __init__(self, name):
+        self.name = name
+        self.children = []
+
+    def add_child(self, child_node):
+        self.children.append(child_node)
+
+class NaryTree:
+    def __init__(self):
+        self.root = NaryTreeNode("Filters")
+
+    def add_filter(self, parent_name, filter_name):
+        parent_node = self._find_node(self.root, parent_name)
+        if parent_node:
+            parent_node.add_child(NaryTreeNode(filter_name))
+
+    def _find_node(self, node, name):
+        if node.name == name:
+            return node
+        for child in node.children:
+            found = self._find_node(child, name)
+            if found:
+                return found
+        return None
 
 class FilterHistory:
-    """A simple stack to maintain filter history for undo functionality."""
     def __init__(self):
         self.history = []
 
     def push(self, image):
-        self.history.append(np.copy(image))  # Save a copy of the image state
+        self.history.append(np.copy(image))
 
     def pop(self):
         if self.history:
@@ -16,117 +40,148 @@ class FilterHistory:
         return None
 
 class FilterRegistry:
-    """A hash map to register and retrieve filters by name."""
     def __init__(self):
         self.filters = {}
 
-    def register(self, name, filter_function):
-        self.filters[name] = filter_function
+    def register(self, name, func):
+        self.filters[name] = func
 
-    def get_filter(self, name):
+    def get(self, name):
         return self.filters.get(name)
 
 class ImageProcessor:
     def __init__(self, image_path):
-        self.image = Image.open(image_path).convert('RGB')
+        self.image = Image.open(image_path).convert("RGB")
         self.image_array = np.array(self.image)
-        self.history = FilterHistory()  # Stack for history
-        self.filter_registry = FilterRegistry()
+        self.history = FilterHistory()
+        self.registry = FilterRegistry()
+        self.tree = NaryTree()
         self._register_filters()
+        self._build_tree()
 
     def _register_filters(self):
-        """Register available filters in the filter registry."""
-        self.filter_registry.register("grayscale", self.apply_grayscale)
-        self.filter_registry.register("inversion", self.apply_inversion)
-        self.filter_registry.register("blur", self.apply_blur)
+        self.registry.register("grayscale", self.apply_grayscale)
+        self.registry.register("inversion", self.apply_inversion)
+        self.registry.register("blur", self.apply_blur)
+        self.registry.register("crop", self.apply_crop)
+        self.registry.register("rotate", self.apply_rotate)
 
-    def apply_grayscale(self):
-        """Convert the image to grayscale."""
-        gray = np.dot(self.image_array[..., :3], [0.2989, 0.5870, 0.1140])
-        gray_image = np.stack((gray,) * 3, axis=-1)
-        self.history.push(self.image_array)  # Save current state for undo
-        self.image_array = gray_image
-        return Image.fromarray(gray_image.astype('uint8'))
-
-    def apply_inversion(self):
-        """Invert the colors of the image."""
-        inverted_image = 255 - self.image_array
-        self.history.push(self.image_array)  # Save current state for undo
-        self.image_array = inverted_image
-        return Image.fromarray(inverted_image.astype('uint8'))
-
-    def apply_blur(self):
-        """Apply a simple blur filter using a kernel."""
-        kernel = np.array([[1/16, 2/16, 1/16],
-                           [2/16, 4/16, 2/16],
-                           [1/16, 2/16, 1/16]])
-        return self.apply_filter(kernel)
+    def _build_tree(self):
+        self.tree.add_filter("Filters", "Color Filters")
+        self.tree.add_filter("Color Filters", "Grayscale")
+        self.tree.add_filter("Color Filters", "Inversion")
+        self.tree.add_filter("Filters", "Effects")
+        self.tree.add_filter("Effects", "Blur")
+        self.tree.add_filter("Filters", "Transformations")
+        self.tree.add_filter("Transformations", "Crop")
+        self.tree.add_filter("Transformations", "Rotate")
 
     def apply_filter(self, kernel):
-        """Apply a convolutional filter to the image."""
-        kernel_height, kernel_width = kernel.shape
-        pad_height = kernel_height // 2
-        pad_width = kernel_width // 2
+        kh, kw = kernel.shape
+        ph, pw = kh // 2, kw // 2
 
-        # Pad the image with zeros on the border
-        padded_image = np.pad(self.image_array, ((pad_height, pad_height), (pad_width, pad_width), (0, 0)), mode='constant')
+        padded = np.pad(self.image_array, ((ph, ph), (pw, pw), (0, 0)), mode='edge')
+        filtered = np.zeros_like(self.image_array)
 
-        filtered_image = np.zeros_like(self.image_array)
-
-        # Convolve the kernel over the image
         for i in range(self.image_array.shape[0]):
             for j in range(self.image_array.shape[1]):
-                filtered_image[i, j] = np.sum(
-                    padded_image[i:i + kernel_height, j:j + kernel_width] * kernel[:, :, np.newaxis], axis=(0, 1)
-                )
+                region = padded[i:i+kh, j:j+kw]
+                pixel = np.sum(region * kernel[:, :, None], axis=(0, 1))
+                filtered[i, j] = pixel
 
-        self.history.push(self.image_array)  # Save current state for undo
-        self.image_array = filtered_image
-        return Image.fromarray(filtered_image.astype('uint8'))
+        self.history.push(self.image_array)
+        self.image_array = filtered
+        return Image.fromarray(filtered.astype('uint8'))
+
+    def display_filters(self):
+        print("\nAvailable Filters:")
+        for i, child in enumerate(self.tree.root.children, start=1):
+            print(f"{i}. {child.name}")
+            for j, sub in enumerate(child.children, start=1):
+                print(f"   {i}.{j} {sub.name}")
+
+    def apply_inversion(self):
+        result = 255 - self.image_array
+        self.history.push(self.image_array)
+        self.image_array = result
+        return Image.fromarray(result.astype('uint8'))
+
+    def apply_grayscale(self):
+        gray = np.dot(self.image_array[..., :3], [0.2989, 0.5870, 0.1140])
+        result = np.stack((gray,)*3, axis=-1)
+        self.history.push(self.image_array)
+        self.image_array = result
+        return Image.fromarray(result.astype('uint8'))
+
+    def apply_blur(self):
+        kernel = np.ones((3, 3)) / 9
+        return self.apply_filter(kernel)
+
+    def apply_crop(self):
+        left = int(input("Left: "))
+        top = int(input("Top: "))
+        right = int(input("Right: "))
+        bottom = int(input("Bottom: "))
+
+        if left < 0 or top < 0 or right > self.image_array.shape[1] or bottom > self.image_array.shape[0]:
+            print("Invalid coordinates.")
+            return Image.fromarray(self.image_array.astype('uint8'))
+
+        if left >= right or top >= bottom:
+            print("Invalid rectangle.")
+            return Image.fromarray(self.image_array.astype('uint8'))
+
+        result = self.image_array[top:bottom, left:right]
+        self.history.push(self.image_array)
+        self.image_array = result
+        return Image.fromarray(result.astype('uint8'))
+
+    def apply_rotate(self):
+        angle = float(input("Angle: "))
+        rotated = Image.fromarray(self.image_array).rotate(angle)
+        self.history.push(self.image_array)
+        self.image_array = np.array(rotated)
+        return rotated
 
     def undo(self):
-        """Undo the last filter applied."""
-        previous_image = self.history.pop()
-        if previous_image is not None:
-            self.image_array = previous_image
+        prev = self.history.pop()
+        if prev is not None:
+            self.image_array = prev
             print("Undo successful.")
         else:
-            print("No more actions to undo.")
+            print("Nothing to undo.")
 
     def show_image(self):
-        """Display the current image."""
-        img = Image.fromarray(self.image_array.astype('uint8'))
-        img.show()
+        Image.fromarray(self.image_array.astype('uint8')).show()
 
 def main():
-    image_path = input("Enter the path to the image file: ")
-    processor = ImageProcessor(image_path)
+    path = input("Enter image path: ")
+    processor = ImageProcessor(path)
 
     while True:
-        print("\nChoose a filter:")
-        print("1. Grayscale")
-        print("2. Inversion")
-        print("3. Blur")
-        print("4. Undo")
-        print("5. Exit")
-        choice = input("Enter your choice (1/2/3/4/5): ")
+        processor.display_filters()
+        choice = input("Choose (1.1, 1.2, 2.1, 3.1, 3.2) or Undo/Exit: ")
 
-        if choice == '1':
-            processed_image = processor.apply_grayscale()
+        if choice in ["1.1", "1.2", "2.1", "3.1", "3.2"]:
+            mapping = {
+                "1.1": processor.apply_grayscale,
+                "1.2": processor.apply_inversion,
+                "2.1": processor.apply_blur,
+                "3.1": processor.apply_crop,
+                "3.2": processor.apply_rotate
+            }
+            mapping[choice]()
             processor.show_image()
-        elif choice == '2':
-            processed_image = processor.apply_inversion()
-            processor.show_image()
-        elif choice == '3':
-            processed_image = processor.apply_blur()
-            processor.show_image()
-        elif choice == '4':
+
+        elif choice.lower() == "undo":
             processor.undo()
             processor.show_image()
-        elif choice == '5':
+
+        elif choice.lower() == "exit":
             break
+
         else:
-            print("Invalid choice.")
+            print("Invalid input.")
 
 if __name__ == "__main__":
     main()
